@@ -1,48 +1,63 @@
 using System.Text;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 
 namespace NetEscapades.EnumGenerators;
 
 [Generator]
-public class EnumGenerator : IIncrementalGenerator
+public class EnumGenerator : ISourceGenerator
 {
     private const string DisplayAttribute = "System.ComponentModel.DataAnnotations.DisplayAttribute";
     private const string DescriptionAttribute = "System.ComponentModel.DescriptionAttribute";
     private const string EnumExtensionsAttribute = "NetEscapades.EnumGenerators.EnumExtensionsAttribute";
     private const string FlagsAttribute = "System.FlagsAttribute";
 
-    public void Initialize(IncrementalGeneratorInitializationContext context)
+    public void Initialize(GeneratorInitializationContext context)
     {
-        context.RegisterPostInitializationOutput(ctx => ctx.AddSource(
+        context.RegisterForPostInitialization(ctx => ctx.AddSource(
             "EnumExtensionsAttribute.g.cs", SourceText.From(SourceGenerationHelper.Attribute, Encoding.UTF8)));
-
-        IncrementalValuesProvider<EnumToGenerate?> enumsToGenerate = context.SyntaxProvider
-            .ForAttributeWithMetadataName(
-                EnumExtensionsAttribute,
-                predicate: (node, _) => node is EnumDeclarationSyntax,
-                transform: GetTypeToGenerate)
-            .Where(static m => m is not null);
-
-        context.RegisterSourceOutput(enumsToGenerate,
-            static (spc, enumToGenerate) => Execute(in enumToGenerate, spc));
+        
+        context.RegisterForSyntaxNotifications(() => new EnumGeneratorSyntaxReceiver());
     }
 
-    static void Execute(in EnumToGenerate? enumToGenerate, SourceProductionContext context)
+    public void Execute(GeneratorExecutionContext context)
+    {
+        try
+        {
+            if (context.SyntaxReceiver is not EnumGeneratorSyntaxReceiver syntaxReceiver)
+                return;
+
+            foreach (var target in syntaxReceiver.Targets)
+            {
+                // get target type info
+                var semanticModel = context.Compilation.GetSemanticModel(target.SyntaxTree);
+                var typeSymbol = semanticModel.GetDeclaredSymbol(target, context.CancellationToken);
+                if (typeSymbol == null)
+                    throw new Exception("Can not get type symbol");
+
+                var enumToGenerate = GetTypeToGenerate(typeSymbol, context.CancellationToken);
+                GenerateEnum(enumToGenerate, context);
+            }
+        }
+        catch (Exception e)
+        {
+            System.Diagnostics.Trace.TraceError(e.Message);
+        }
+    }
+
+    private static void GenerateEnum(in EnumToGenerate? enumToGenerate, GeneratorExecutionContext context)
     {
         if (enumToGenerate is { } eg)
         {
-            StringBuilder sb = new StringBuilder();
+            var sb = new StringBuilder();
             var result = SourceGenerationHelper.GenerateExtensionClass(sb, in eg);
             context.AddSource(eg.Name + "_EnumExtensions.g.cs", SourceText.From(result, Encoding.UTF8));    
         }
     }
 
-    static EnumToGenerate? GetTypeToGenerate(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    private static EnumToGenerate? GetTypeToGenerate(ISymbol symbol, CancellationToken ct)
     {
-        INamedTypeSymbol? enumSymbol = context.TargetSymbol as INamedTypeSymbol;
-        if (enumSymbol is null)
+        if (symbol is not INamedTypeSymbol enumSymbol)
         {
             // nothing to do if this type isn't available
             return null;
@@ -50,14 +65,13 @@ public class EnumGenerator : IIncrementalGenerator
 
         ct.ThrowIfCancellationRequested();
 
-        string name = enumSymbol.Name + "Extensions";
-        string nameSpace = enumSymbol.ContainingNamespace.IsGlobalNamespace ? string.Empty : enumSymbol.ContainingNamespace.ToString();
+        var name = enumSymbol.Name + "Extensions";
+        var nameSpace = enumSymbol.ContainingNamespace.IsGlobalNamespace ? string.Empty : enumSymbol.ContainingNamespace.ToString();
         var hasFlags = false;
 
-        foreach (AttributeData attributeData in enumSymbol.GetAttributes())
+        foreach (var attributeData in enumSymbol.GetAttributes())
         {
-            if ((attributeData.AttributeClass?.Name == "FlagsAttribute" ||
-                 attributeData.AttributeClass?.Name == "Flags") &&
+            if (attributeData.AttributeClass?.Name is "FlagsAttribute" or "Flags" &&
                 attributeData.AttributeClass.ToDisplayString() == FlagsAttribute)
             {
                 hasFlags = true;
@@ -70,25 +84,24 @@ public class EnumGenerator : IIncrementalGenerator
                 continue;
             }
 
-            foreach (KeyValuePair<string, TypedConstant> namedArgument in attributeData.NamedArguments)
+            foreach (var namedArgument in attributeData.NamedArguments)
             {
-                if (namedArgument.Key == "ExtensionClassNamespace"
-                    && namedArgument.Value.Value?.ToString() is { } ns)
+                switch (namedArgument.Key)
                 {
-                    nameSpace = ns;
-                    continue;
-                }
-
-                if (namedArgument.Key == "ExtensionClassName"
-                    && namedArgument.Value.Value?.ToString() is { } n)
-                {
-                    name = n;
+                    case "ExtensionClassNamespace" 
+                    when namedArgument.Value.Value?.ToString() is { } ns:
+                        nameSpace = ns;
+                        continue;
+                    case "ExtensionClassName" 
+                    when namedArgument.Value.Value?.ToString() is { } n:
+                        name = n;
+                        break;
                 }
             }
         }
 
-        string fullyQualifiedName = enumSymbol.ToString();
-        string underlyingType = enumSymbol.EnumUnderlyingType?.ToString() ?? "int";
+        var fullyQualifiedName = enumSymbol.ToString();
+        var underlyingType = enumSymbol.EnumUnderlyingType?.ToString() ?? "int";
 
         var enumMembers = enumSymbol.GetMembers();
         var members = new List<(string, EnumValueOption)>(enumMembers.Length);
