@@ -10,39 +10,44 @@ public class EnumGenerator : IIncrementalGenerator
 {
     private const string DisplayAttribute = "System.ComponentModel.DataAnnotations.DisplayAttribute";
     private const string DescriptionAttribute = "System.ComponentModel.DescriptionAttribute";
-    private const string EnumExtensionsAttribute = "NetEscapades.EnumGenerators.EnumExtensionsAttribute";
+    private const string EnumExtensionsAttribute = "EnumExtensions";
     private const string FlagsAttribute = "System.FlagsAttribute";
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        context.RegisterPostInitializationOutput(ctx => ctx.AddSource(
-            "EnumExtensionsAttribute.g.cs", SourceText.From(SourceGenerationHelper.Attribute, Encoding.UTF8)));
+        context.RegisterPostInitializationOutput(ctx => 
+            ctx.AddSource("EnumExtensionsAttribute.g.cs", SourceText.From(SourceGenerationHelper.Attribute, Encoding.UTF8)));
 
-        IncrementalValuesProvider<EnumToGenerate?> enumsToGenerate = context.SyntaxProvider
-            .ForAttributeWithMetadataName(
-                EnumExtensionsAttribute,
-                predicate: (node, _) => node is EnumDeclarationSyntax,
-                transform: GetTypeToGenerate)
-            .Where(static m => m is not null);
+        var enumsToGenerate = context.SyntaxProvider.CreateSyntaxProvider((node, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+
+            if (node is not EnumDeclarationSyntax enumNode)
+                return false;
+            
+            var hasAttribute = enumNode.AttributeLists.SelectMany(x => x.Attributes).Any(a =>
+                a.Name.ToString().Contains(EnumExtensionsAttribute));
+
+            return hasAttribute;
+        }, GetTypeToGenerate);
 
         context.RegisterSourceOutput(enumsToGenerate,
             static (spc, enumToGenerate) => Execute(in enumToGenerate, spc));
     }
 
-    static void Execute(in EnumToGenerate? enumToGenerate, SourceProductionContext context)
+    private static void Execute(in EnumToGenerate? enumToGenerate, SourceProductionContext context)
     {
         if (enumToGenerate is { } eg)
         {
-            StringBuilder sb = new StringBuilder();
+            var sb = new StringBuilder();
             var result = SourceGenerationHelper.GenerateExtensionClass(sb, in eg);
             context.AddSource(eg.Name + "_EnumExtensions.g.cs", SourceText.From(result, Encoding.UTF8));    
         }
     }
 
-    static EnumToGenerate? GetTypeToGenerate(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    private static EnumToGenerate? GetTypeToGenerate(GeneratorSyntaxContext context, CancellationToken ct)
     {
-        INamedTypeSymbol? enumSymbol = context.TargetSymbol as INamedTypeSymbol;
-        if (enumSymbol is null)
+        if (context.SemanticModel.GetDeclaredSymbol(context.Node) is not INamedTypeSymbol enumSymbol)
         {
             // nothing to do if this type isn't available
             return null;
@@ -50,11 +55,11 @@ public class EnumGenerator : IIncrementalGenerator
 
         ct.ThrowIfCancellationRequested();
 
-        string name = enumSymbol.Name + "Extensions";
-        string nameSpace = enumSymbol.ContainingNamespace.IsGlobalNamespace ? string.Empty : enumSymbol.ContainingNamespace.ToString();
+        var name = enumSymbol.Name + "Extensions";
+        var nameSpace = enumSymbol.ContainingNamespace.IsGlobalNamespace ? string.Empty : enumSymbol.ContainingNamespace.ToString();
         var hasFlags = false;
 
-        foreach (AttributeData attributeData in enumSymbol.GetAttributes())
+        foreach (var attributeData in enumSymbol.GetAttributes())
         {
             if ((attributeData.AttributeClass?.Name == "FlagsAttribute" ||
                  attributeData.AttributeClass?.Name == "Flags") &&
@@ -70,7 +75,7 @@ public class EnumGenerator : IIncrementalGenerator
                 continue;
             }
 
-            foreach (KeyValuePair<string, TypedConstant> namedArgument in attributeData.NamedArguments)
+            foreach (var namedArgument in attributeData.NamedArguments)
             {
                 if (namedArgument.Key == "ExtensionClassNamespace"
                     && namedArgument.Value.Value?.ToString() is { } ns)
@@ -87,8 +92,8 @@ public class EnumGenerator : IIncrementalGenerator
             }
         }
 
-        string fullyQualifiedName = enumSymbol.ToString();
-        string underlyingType = enumSymbol.EnumUnderlyingType?.ToString() ?? "int";
+        var fullyQualifiedName = enumSymbol.ToString();
+        var underlyingType = enumSymbol.EnumUnderlyingType?.ToString() ?? "int";
 
         var enumMembers = enumSymbol.GetMembers();
         var members = new List<(string, EnumValueOption)>(enumMembers.Length);
